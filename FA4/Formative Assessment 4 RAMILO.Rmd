@@ -1,0 +1,444 @@
+---
+title: "Formative Assessment 4 RAMILO"
+author: "Ramilo, Zion John Yousef"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(kableExtra)
+library(cowplot)
+library(FNN)
+library(stat471)
+library(psych)
+library(summarytools)
+library(splines)
+library(broom)
+```
+
+Import and show the data:
+```{r}
+bmd_raw <- read_excel("bmd-data.xlsx")
+kable(head(bmd_raw))
+```
+
+Explore the layout of the data set (numeric data):
+```{r}
+desc_bmd<-describe(bmd_raw %>% select(where(is.numeric)))
+kable(t(desc_bmd))
+```
+
+Explore the layout of the data set (non-numeric data):
+```{r}
+bmd_raw_summa<-dfSummary(bmd_raw %>% select(where(~ !is.numeric(.))))
+print(bmd_raw_summa, method = "render")
+```
+
+What operation is necessary to get it into tidy format?
+There are no operations necessary to be performed to get it into a tidy format as the following conditions are met:
+
+- Every row is an individual observation
+- Every variable is a unique column
+- Every cell has a value corresponding to the column and observation
+
+What is the total number of children in this data set?
+```{r}
+count_age_group <- bmd_raw %>% 
+  mutate(age_group = cut(
+    age,
+    breaks = c(0,2,6,12,18,25,40,65,max(age)),
+    labels = c("Infancy","Preschool Period","Middle School Childhood","Adolescence","Emerging Adulthood","Early Adulthood","Middle Adulthood","Late Adulthood")
+  )) %>% 
+  group_by(age_group) %>% 
+  summarize(
+    Count = n(
+    )
+  )
+kable(count_age_group)
+```
+What are the number of boys and girls?
+```{r}
+count_sex_group <- bmd_raw %>%
+  group_by(sex) %>% 
+  summarize(
+    Count = n(
+    )
+  )
+kable(count_sex_group)
+```
+
+What are the median ages of these boys and girls?
+```{r}
+median_sex_group <- bmd_raw %>%
+  group_by(sex) %>% 
+  summarize(
+    median_age = median(age)
+  )
+kable(median_sex_group)
+```
+
+Produce plots to compare the distributions of spnbmd and age between boys and girls (display these
+as two plots side by side, one for spnbmd and one for age). Are there apparent differences in either
+spnbmd or age between these two groups?
+```{r}
+age_dist <- ggplot(bmd_raw,aes(x=age,fill = sex))+
+  geom_histogram(aes(y=..density..),
+                   binwidth=9,
+                   colour="black", fill="white")+
+  geom_density(alpha=0.5)+
+  facet_grid(.~sex)+
+  theme_minimal()+ 
+  scale_fill_brewer(palette = "Set1")+
+  labs(
+    x="Age",
+    y="Density",
+    title="Age Distributions between the Male and Female Sex",
+    
+  )
+age_dist
+```
+```{r}
+spnbmd_dist <- ggplot(bmd_raw,aes(x=spnbmd,fill = sex))+
+  geom_density(alpha=0.5)+
+  facet_grid(.~sex)+
+  theme_minimal()+ 
+  scale_fill_brewer(palette = "Set1")+
+  labs(
+    x="Bone mineral density",
+    y="Density",
+    title="Bone mineral density Distributions between the Male and Female Sex",
+  )
+spnbmd_dist
+```
+
+There are apparent differences between the sex, where we can observe within the visualization of the data with age that the observations within the male sex group is more Platykurtic in comparison to the female group with a more Mesokurtic, this indicate that there are more variations within the male group in relation to age than in the female sex group.
+
+Another difference between the two sex is the bone marrow density where we can observe that the male takes upon a distribution of Mesokurtic while the female sex takes on a more Leptokurtic distribution. This suggests that the observations within the female sex has less variation with regards to bone marrow density in comparison to the male sex group.
+
+Create a scatter plot of spnbmd (y axis) versus age (x axis), faceting by gender. What trends do you
+see in this data?
+```{r}
+spnbmdNage_scat<- ggplot(bmd_raw,aes(x=age,y=spnbmd,color = sex))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method = "loess",se=FALSE)+
+  facet_grid(.~sex)+
+  theme_minimal()+ 
+  scale_color_brewer(palette = "Set1")+
+  labs(
+    y="Bone mineral density",
+    x="Age",
+    title="Scatter plot of Age vs Bone mineral density",
+  )
+spnbmdNage_scat
+```
+
+The scatter plot is was faceted by sex and a loess method was performed to understand the general behavior of the data, to which shows that each one has a different behavior. For the sex of female, the loess shows a behavior where two quadratic functions can be able to explain the data and create a powerful predictive model. The male sex however shows a that it is a combination of both of a quadratc behavior on lower ages and a linear behavior on higher ages. These plots indicate that if we are to create a model we have to create it in such a way that it is conditional where the function takes a form of a piecewise function, where different functions are used for different intervals.
+
+Splitting the data into train and test sets
+```{r}
+train_ind <- sample(1:nrow(bmd_raw),size=round(0.8*nrow(bmd_raw)))
+
+bmd_train <- bmd_raw[train_ind,]
+bmd_test <- bmd_raw[-train_ind,]
+
+bmd_train_male <- bmd_train %>% 
+  filter(sex=="M")
+bmd_train_female <- bmd_train %>% 
+  filter(sex=="F")
+
+bmd_test_male <- bmd_test %>% 
+  filter(sex=="M")
+bmd_test_female <- bmd_test %>% 
+  filter(sex=="F")
+```
+
+Using cross_validate_spline from the stat471 R package, perform 10-fold cross-validation on
+bmd_train_male and bmd_train_female, trying degrees of freedom 1,2,. . . ,15. Display the two resulting
+CV plots side by side.
+
+Male Sex:
+```{r}
+max_df <- 15
+validation_error_male <- numeric(max_df)
+df <- 1
+for (df in 1:max_df) {
+  formula <- sprintf("spnbmd ~ ns(age, df = %d)", df)
+  spline_fit <- lm(formula = formula, data = bmd_train_male)
+  y_hat_validation <- predict(spline_fit, newdata = bmd_test_male)
+  validation_error_male[df] <- bmd_test_male %>%
+                          cbind(y_hat_validation) %>%
+                          summarise(mean((y_hat_validation - spnbmd)^2)) %>%
+                          pull()
+}
+best_df_male <- which.min(validation_error_male)
+worst_df_male <- which.max(validation_error_male)
+
+cat("Validation Errors: \n", validation_error_male,
+    "\n\nBest Degrees of Freedom: ", best_df_male,
+    "\nValidation Error Value: ", validation_error_male[best_df_male],
+    "\n\nWorst Degrees of Freedom: ", worst_df_male,
+    "\nValidation Error Value: ", validation_error_male[worst_df_male]
+)
+```
+Female Sex
+```{r}
+max_df <- 15
+validation_error_female <- numeric(max_df)
+df <- 1
+for (df in 1:max_df) {
+  formula <- sprintf("spnbmd ~ ns(age, df = %d)", df)
+  spline_fit <- lm(formula = formula, data = bmd_train_female)
+  y_hat_validation <- predict(spline_fit, newdata = bmd_test_female)
+  validation_error_female[df] <- bmd_test_female %>%
+                          cbind(y_hat_validation) %>%
+                          summarise(mean((y_hat_validation - spnbmd)^2)) %>%
+                          pull()
+}
+best_df_female <- which.min(validation_error_female)
+worst_df_female <- which.max(validation_error_female)
+
+cat("Validation Errors: \n", validation_error_female,
+    "\n\nBest Degrees of Freedom: ", best_df_female,
+    "\nValidation Error Value: ", validation_error_female[best_df_female],
+    "\n\nWorst Degrees of Freedom: ", worst_df_female,
+    "\nValidation Error Value: ", validation_error_female[worst_df_female]
+)
+```
+Plotting validation errors
+```{r}
+male_validation_errors <- tibble("Degrees of Freedom"=1:max_df,"Validation Errors"=validation_error_male,"Sex"=rep("Male",max_df))
+
+female_validation_errors <- tibble("Degrees of Freedom"=1:max_df,"Validation Errors"=validation_error_female,"Sex"=rep("Female",max_df))
+
+all_sex_validation_errors <- bind_rows(male_validation_errors,female_validation_errors)
+
+plot_vali_errors <- ggplot(all_sex_validation_errors,aes(x=`Degrees of Freedom`,y=`Validation Errors`,color=Sex))+
+  geom_point() +
+  geom_line()+
+  facet_grid(.~Sex)+
+  theme_minimal()+
+  scale_color_brewer(palette = "Set1")+
+  labs(
+    y="Validation Errors",
+    x="Degrees of Freedom",
+    title="Scatter plot of Degrees of Freedom vs Validation Errors",
+  )
+plot_vali_errors
+```
+
+For the sake of simplicity, let’s use the same degrees of freedom for males as well as females. Define
+df.min to be the maximum of the two df.min values for males and females, and define df.1se likewise.
+Add these two spline fits to the scatter plot of spnbmd (y axis) versus age (x axis), faceting by gender.
+
+```{r}
+df_selection <- all_sex_validation_errors %>% 
+  group_by(Sex) %>% 
+  mutate(
+    min_error = min(`Validation Errors`),
+    se_error = min(`Validation Errors`) / sqrt(n()),
+    threshold_error = min_error + se_error,
+    is_min = (`Validation Errors` == min_error),
+    is_within_1se = (`Validation Errors` <= threshold_error)
+  ) %>% 
+  summarise(
+    df.min = `Degrees of Freedom`[which.min(`Validation Errors`)],
+    df.1se = min(`Degrees of Freedom`[is_within_1se])
+  )
+kable(df_selection)
+df.min_max <- max(df_selection$df.min)
+df.1se_max <- max(df_selection$df.1se)
+```
+
+```{r}
+spnbmdNage_scat_costumDF<- ggplot(bmd_raw,aes(x=age,y=spnbmd,color = sex))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method = "lm",
+              se=FALSE,
+              formula = y ~ ns(x,df=df.min_max),
+              linewidth = 1,
+              aes(color = paste0("min (df =",df.min_max,")")
+              ))+
+  geom_smooth(method = "lm",
+              se=FALSE,
+              formula = y ~ ns(x,df=df.1se_max),
+              linewidth = 1,
+              aes(color = paste0("1se (df =",df.1se_max,"))")))+
+  facet_grid(.~sex)+
+  theme_minimal()+ 
+  scale_color_brewer(palette = "Spectral")+
+  labs(
+    y="Bone mineral density",
+    x="Age",
+    title="Scatter plot of Age vs Bone mineral density between Sex",
+  )
+spnbmdNage_scat_costumDF
+```
+
+Given your intuition for what growth curves look like, which of these two values of the degrees of freedom
+makes more sense?
+
+The minimum degree of freedom between `df.min` and `df.1se` is the best degrees of freedom, this is because the more the degree of freedom is the more it is overfitted to the data itself and fail to generalize the behavior of the data, which is why a lower degree of freedom is encouraged as it makes itself more generalized such that once new data will arrive, it can predict the outcome of the observation compared to a model that has a higher degree of freedom. However, it is still important to note that to not overly generalize the model to the point that df=1 which might not capture the whole behavior of the data.
+
+Using the degrees of freedom chosen above, fit final spline models to bmd_train_male and
+bmd_train_female.
+
+```{r}
+spline_model_male = lm(spnbmd ~ ns(age,df=min(c(df.min_max,df.1se_max))),data = bmd_train_male)
+spline_model_female = lm(spnbmd ~ ns(age,df=min(c(df.min_max,df.1se_max))),data = bmd_train_female)
+
+summary(spline_model_male)
+summary(spline_model_female)
+```
+Using the final models above, answer the following questions for boys and girls separately: What is the
+training RMSE? What is the test RMSE? Print these metrics in a nice table.
+
+```{r}
+rmse_male_train = sqrt(mean(residuals(spline_model_male)^2))
+rmse_female_train = sqrt(mean(residuals(spline_model_female)^2))
+
+cat("RMSE Male (Train): ",rmse_male_train,
+    "\nRMSE Female (Train): ",rmse_female_train)
+```
+```{r}
+bmd_test_male$pred<-predict(spline_model_male,newdata=bmd_test_male)
+bmd_test_female$pred<-predict(spline_model_female,newdata=bmd_test_female)
+
+rmse_male_test = sqrt(mean((bmd_test_male$spnbmd - bmd_test_male$pred)^2))
+rmse_female_test = sqrt(mean((bmd_test_female$spnbmd - bmd_test_female$pred)^2))
+
+cat("RMSE Male (Train): ",rmse_male_test,
+    "\nRMSE Female (Train): ",rmse_female_test)
+```
+How do the training and test errors compare? What does this suggest about the extent of overfitting
+that has occurred?
+
+```{r}
+if(rmse_male_test < rmse_male_train){
+  cat("Male Sex:\nRMSE for train data is greater than the test data with a difference of: ",rmse_male_train-rmse_male_test)
+}else{
+  cat("Male Sex:\nRMSE for test data is greater than the train data with a difference of: ",rmse_male_test-rmse_male_train)
+}
+
+if(rmse_female_test < rmse_female_train){
+  cat("\n\nFemale Sex:\nRMSE for train data is greater than the test data with a difference of: ",rmse_female_train-rmse_female_test)
+}else{
+  cat("\n\nFemale Sex:\nRMSE for test data is greater than the train data with a difference of: ",rmse_female_test-rmse_female_train)
+}
+```
+Using the degrees of freedom chosen above, redo the scatter plot with the overlaid spline fits, this time
+without faceting in order to directly compare the spline fits for boys and girls. Instead of faceting,
+distinguish the genders by color.
+
+```{r}
+spnbmdNage_scat_allage<- ggplot(bmd_raw,aes(x=age,y=spnbmd,color = sex))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method = "lm",
+              se=FALSE,
+              formula = y ~ ns(x,df=df.min_max),
+              linewidth = 1,
+              aes(color = paste0("min (df =",df.min_max,")")
+              ))+
+  geom_smooth(method = "lm",
+              se=FALSE,
+              formula = y ~ ns(x,df=df.1se_max),
+              linewidth = 1,
+              aes(color = paste0("1se (df =",df.1se_max,"))")))+
+  theme_minimal()+ 
+  scale_color_brewer(palette = "Spectral")+
+  labs(
+    y="Bone mineral density",
+    x="Age",
+    title="Scatter plot of Age vs Bone mineral density",
+  )
+spnbmdNage_scat_allage
+```
+
+The splines help us see the trend in the data much more clearly. Eyeballing these fitted curves, answer the
+following questions. At what ages (approximately) do boys and girls reach the peaks of their growth
+spurts? At what ages does growth largely level off for boys and girls? Do these seem in the right ballpark?
+
+The loess and the models show that the peak of their growth spurts are within their early adulthood which is at the lower values of age, and beyond this it can be observed that the boys and girls level off is beyond their middle adulthood which is 30 above years old, where it can be seen they move in a similar behavior. Yes this behavior is right as this is exactly what doctors have observe throughout a human lifespan.
+
+This apple season is right around the corner, and you’d like to predict the yield of each tree. You come up with perhaps the simplest possible prediction rule: predict this year’s yield for any given tree based on last year’s yield from that same tree. Without doing any programming, answer the following questions:
+
+1. What is the training error of such a rule?
+
+The training error will show that it will be non-zero as the yield last year does not necessary imply anything strong on predicting the next yield.
+
+2. What is the mean squared bias, mean variance, and expected test error of this prediction rule?
+
+The mean square bias would be that the model would low as the data would be trained on a single data point, and for the variance it would be non-zero as well where the same prediction model would not apply to other trees. Lastly for the expected test error would be large given that the data will have different outcomes for each tree.
+
+3. Why is this not the best possible prediction rule?
+
+This prediction rule is not the best as the data cannot accurately represent real world observations and underlying factors into growing apples. This is also dangerous as it would not be reproducable in a sense that it would not be applied to the other trees within the farm. 
+
+As a second attempt to predict a yield for each tree, you average together last year’s yields of the K trees
+closest to it (including itself, and breaking ties randomly if necessary). So if you choose K = 1, you get back the simple rule from the previous section. This more general rule is called K-nearest neighbors (KNN)
+regression (see ISLR p. 105).KNN is not a parametric model like linear or logistic regression, so it is a little harder to pin down its degrees of freedom.
+
+1. What happens to the model complexity as K increases? Why?
+
+As K increases the more time it takes to calculate the values this is because the model needs more time and computing power since the number of trees being included is being increased by one unit.
+
+2. The degrees of freedom for KNN is sometimes considered n/K, where n is the training set size. Why
+might this be the case? [Hint: consider a situation where the data are clumped in groups of K.]
+
+
+
+3. Conceptually, why might increasing K tend to improve the prediction rule? What does this have to do
+with the bias-variance tradeoff?
+
+Conceptually the prediction rule will improve because the data will not be biased to only close neighbors of that tree and will consider more of the surrounding trees.
+
+4. Conceptually, why might increasing K tend to worsen the prediction rule? What does this have to do
+with the bias-variance tradeoff?
+
+Conceptually the prediction rule will worsen because as K increases there would be posibilities that there would be outlier trees that will produce more yield  or less yeild and would not help in predicting the yield of the single tree we are looking at.
+
+```{r}
+training_results_summary <- readRDS("training_results_summary.rds")
+kable(head(training_results_summary))
+```
+
+Create a new tibble called overall_results the contains the mean squared bias, mean variance,
+and expected test error for each value of K. This tibble should have four columns: K, mean_sq_bias,
+mean_variance, and expected_test_error.
+
+```{r}
+overall_results <- training_results_summary %>% 
+  group_by(K) %>% 
+  summarise(
+    mean_sq_bias = mean(bias^2),
+    mean_variance = mean(variance),
+    expected_test_error = mean(bias^2+variance)
+  )
+kable(overall_results)
+```
+
+Using overall_results, plot the mean squared bias, mean variance, and expected test error on the same
+axes as a function of K. Based on this plot, what is the optimal value of K?
+
+```{r}
+overall_results <- overall_results %>%
+  mutate(K = as.numeric(K)) %>%
+  arrange(K)
+overallResults_scat_sq_bias <- ggplot(overall_results, aes(x = K, y = mean_sq_bias)) +
+  geom_point(alpha = 0.5) +
+  geom_line(aes(group = 1), linewidth = 0.5) +
+  theme_minimal() + 
+  labs(
+    y = "Mean squared bias",
+    x = "K",
+    title = "Scatter plot of K vs Mean squared bias"
+  )
+overallResults_scat_sq_bias
+```
+
+
+
